@@ -3,10 +3,76 @@ import hashlib
 import time
 import pandas as pd
 from datetime import datetime
+import streamlit.components.v1 as components
+import json, os
+from datetime import datetime
+import requests
+
+SHEET_ID = "1jUbSyUFGGX4WeCw5Pwj8hDHkmCmkuy9H-PL22gTJhxY"
+WEB_APP_URL = "https://script.google.com/macros/s/AKfycby0xCfO-0ozSBNqLs0qkLk9sIrqBwujteOmOUHd6pgxn4RdUq3TYWj7IRBgQhYGuDDlZw/exec"
+
+
+def lire_sheet(nom_feuille):
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={nom_feuille}"
+    try:
+        return pd.read_csv(url)
+    except:
+        return pd.DataFrame()
+
+# Au démarrage, on lit le vrai cahier, pas la mémoire
+etudiants_df = lire_sheet("Etudiants")
+resultats_df = lire_sheet("Resultats")
+
+
+def son_erreur():
+    components.html("""
+        <script>
+        if (navigator.vibrate) { navigator.vibrate([200, 100, 200]); }
+        var audio = new Audio("https://www.soundjay.com/buttons/sounds/button-10.mp3");
+        audio.play();
+        </script>
+    """, height=0)
+
+def son_succes():
+    components.html("""
+        <script>
+        if (navigator.vibrate) { navigator.vibrate([50]); }
+        var audio = new Audio("https://cdn.pixabay.com/audio/2022/03/10/audio_2c8c7b4f2a.mp3");
+        audio.play();
+        </script>
+    """, height=0)
+
+# --- ETUDIANTS EN LIGNE ---
+FICHIER_EN_LIGNE = "en_ligne.json"
+
+def marquer_en_ligne(id_e, nom):
+    import uuid
+    if "mon_token" not in st.session_state:
+        st.session_state.mon_token = str(uuid.uuid4())
+    
+    en_ligne = liste_en_ligne()
+    en_ligne[id_e] = {
+        "nom": nom,
+        "heure": datetime.now().strftime("%H:%M:%S"),
+        "token": st.session_state.mon_token
+    }
+    with open(FICHIER_EN_LIGNE, "w", encoding="utf-8") as f:
+        json.dump(en_ligne, f, indent=2, ensure_ascii=False)
+
+
+def liste_en_ligne():
+    if os.path.exists(FICHIER_EN_LIGNE):
+        try:
+            with open(FICHIER_EN_LIGNE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
 
 st.set_page_config(page_title="MIT Tunis - Monplaisir", page_icon="🎓", layout="wide")
 
-ADMIN_HASH = hashlib.sha256("MIT2026".encode()).hexdigest()
+ADMIN_HASH = hashlib.sha256("MIT@*#2026".encode()).hexdigest()
 def verifier_mdp(mdp):
     return hashlib.sha256(mdp.encode()).hexdigest() == ADMIN_HASH
 
@@ -103,6 +169,15 @@ st.write(f"### {t['bienvenue']}")
 # ===== VUE ADMIN EN HAUT - SEUL ADMIN VOIT CA =====
 if st.session_state.connecte:
     st.markdown("<div class='admin-box'><h3>👑 MODE ADMIN - Vue Administrateur</h3><p>Tu vois tout. Les étudiants ne voient pas cette partie.</p></div>", unsafe_allow_html=True)
+    st.subheader("🟢 Étudiants en ligne")
+    en_ligne = liste_en_ligne()
+    if en_ligne:
+        st.write(f"**{len(en_ligne)} étudiant(s) en ligne**")
+        for id_e, infos in en_ligne.items():
+            st.write(f"🟢 {infos['nom']} - ID: {id_e} - Connecté à {infos['heure']}")
+    else:
+        st.info("Aucun étudiant en ligne pour le moment.")
+
     nb_etudiants = len(st.session_state.etudiants_df) if st.session_state.etudiants_df is not None else 0
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("👨‍🎓 Étudiants inscrits", nb_etudiants)
@@ -139,16 +214,18 @@ if st.session_state.connecte:
         st.rerun()
 elif not st.session_state.etudiant_verifie:
     st.sidebar.info("🔒 Pour voir la Bibliothèque, il faut ton ID Unique.\nSans ID, tu peux voir Formations, Événements et Test, mais pas la Bibliothèque.")
-    id_tape = st.sidebar.text_input("Ton ID Unique (ex: MIT-001)", key="id_unique_input")
+    id_tape = st.sidebar.text_input("Ton ID Unique ()", key="id_unique_input")
     if st.sidebar.button("🔓 Débloquer la Bibliothèque", key="btn_debloquer_biblio"):
         ok, nom_trouve = verifier_id_unique(id_tape)
         if ok:
+            son_succes()
             st.session_state.etudiant_verifie = True
             st.session_state.etudiant_id = id_tape.strip().upper()
             st.session_state.etudiant_nom = nom_trouve
             st.sidebar.success(f"✅ Bienvenue {nom_trouve} ! Bibliothèque débloquée.")
             st.rerun()
         else:
+            son_erreur()
             st.sidebar.error("❌ ID Unique incorrect. Demande ton ID à l'Admin.")
 else:
     st.sidebar.success(f"✅ Connecté : {st.session_state.etudiant_nom}\nID : {st.session_state.etudiant_id}")
@@ -252,6 +329,7 @@ with menu[5]:
         mdp = st.text_input(t["mdp_label"], type="password", key="mdp_admin_input")
         if st.button("Connexion Admin", key="btn_connexion_admin"):
             if verifier_mdp(mdp):
+                son_succes()
                 st.session_state.connecte = True
                 st.session_state.tentatives = 0
                 st.rerun()
@@ -259,9 +337,10 @@ with menu[5]:
                 st.session_state.tentatives += 1
                 restant = 3 - st.session_state.tentatives
                 if restant <= 0:
-                    st.session_state.bloque_jusqua = time.time() + 30
+                    st.session_state.bloque_jusqua = time.time() + 35
                     st.session_state.tentatives = 0
                 else:
+                    son_erreur ()
                     st.error(f"❌ Mauvais mot de passe. Il reste {restant}")
     else:
         st.success(t["bienvenue_admin"])
@@ -310,4 +389,3 @@ with menu[5]:
         if st.button(t["deconnexion"], key="btn_deconnexion_admin"):
             st.session_state.connecte = False
             st.rerun()
-
