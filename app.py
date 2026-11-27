@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -9,8 +10,39 @@ import uuid
 import requests
 from datetime import datetime
 
-# ✏️ CORRIGÉ : doit être la 1ère commande Streamlit
-st.set_page_config(page_title="MIT Tunis - Monplaisir", page_icon="🎓", layout="wide")
+# ✅ CORRIGÉ : UN SEUL set_page_config, et c'est la 1ère commande Streamlit
+st.set_page_config(
+    page_title="MIT Tunis - Monplaisir",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# --- MODE iPHONE / APPLE ---
+# ✅ CORRIGÉ : on ne cache plus le "header", sinon la flèche qui ouvre la barre
+#    latérale disparaît sur téléphone et les étudiants ne peuvent plus entrer leur ID.
+st.markdown("""
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MIT Tunis">
+
+<style>
+    .stButton > button {
+        width: 100%;
+        height: 50px;
+        border-radius: 15px;
+        font-size: 17px;
+        font-weight: bold;
+    }
+    .stTextInput > div > div > input {
+        font-size: 16px !important;
+        border-radius: 12px;
+    }
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
 # ======================================================
 # CONFIGURATION
@@ -29,25 +61,45 @@ DELAI_EN_LIGNE = 300  # secondes d'inactivité avant de disparaître de "en lign
 IDS_PAR_DEFAUT = ["MIT-2026-PENIEL", "MIT-001", "MIT-002"]
 COLONNES_ID = ["id", "id unique", "code", "email", "matricule"]
 
-# ✏️ CORRIGÉ : mot de passe lu depuis les "secrets" si possible
-MOT_DE_PASSE_PAR_DEFAUT = "MIT@*#2026"  # ⚠️ À SUPPRIMER après avoir configuré ADMIN_HASH
+# ======================================================
+# 🔐 MOT DE PASSE ADMIN  →  À REMPLIR PAR TOI, À LA MAIN
+# ======================================================
+# Option A (recommandée) : dans les "Secrets" de Streamlit, ajoute la ligne
+#     ADMIN_HASH = "le_hash_sha256_de_ton_mot_de_passe"
+# Option B (plus simple) : écris ton mot de passe entre les guillemets ci-dessous.
+#     (Attention : si tu publies ce fichier sur GitHub public, tout le monde le verra.)
+MOT_DE_PASSE_ADMIN = ""  # <-- METS TON MOT DE PASSE ICI (ou laisse vide si tu utilises les Secrets)
+
+ADMIN_HASH = ""
 try:
     ADMIN_HASH = st.secrets["ADMIN_HASH"]
 except Exception:
-    ADMIN_HASH = hashlib.sha256(MOT_DE_PASSE_PAR_DEFAUT.encode()).hexdigest()
+    if MOT_DE_PASSE_ADMIN:
+        ADMIN_HASH = hashlib.sha256(MOT_DE_PASSE_ADMIN.encode()).hexdigest()
 
 
 def verifier_mdp(mdp):
-    return hashlib.sha256(mdp.encode()).hexdigest() == ADMIN_HASH
+    # ✅ CORRIGÉ : si aucun mot de passe n'est configuré, personne ne peut entrer
+    if not ADMIN_HASH:
+        return False
+    h = hashlib.sha256(mdp.encode()).hexdigest()
+    return hmac.compare_digest(h, str(ADMIN_HASH))
 
 
 # ======================================================
 # OUTILS : fichiers partagés
 # ======================================================
+@st.cache_resource
+def get_verrou():
+    # ✅ CORRIGÉ : un seul verrou partagé (un verrou créé dans le script serait recréé à chaque rechargement)
+    import threading
+    return threading.Lock()
+
+
 def lire_json(chemin, defaut):
     if os.path.exists(chemin):
         try:
-            with open(chemin, "r", encoding="utf-8") as f:  # ✏️ encoding ajouté
+            with open(chemin, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return defaut
@@ -55,8 +107,13 @@ def lire_json(chemin, defaut):
 
 
 def ecrire_json(chemin, data):
-    with open(chemin, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    # ✅ CORRIGÉ : écriture "atomique" : on écrit dans un fichier temporaire puis on remplace,
+    #    pour qu'un autre visiteur ne lise jamais un fichier à moitié écrit (JSON cassé).
+    tmp = f"{chemin}.{uuid.uuid4().hex}.tmp"
+    with get_verrou():
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, chemin)
 
 
 # ======================================================
@@ -69,6 +126,44 @@ def lire_sheet(nom_feuille):
         return pd.read_csv(url)
     except Exception:
         return pd.DataFrame()
+
+
+# ======================================================
+# DONNÉES DE BASE
+# ======================================================
+LIVRES_DE_BASE = [
+    {"titre": "Python pour débutants", "auteur": "A. Ben Ali", "filiere": "Génie Logiciel", "annee": 2023, "dispo": True},
+    {"titre": "Apprendre Python en 30 jours", "auteur": "S. Gharbi", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
+    {"titre": "Algorithme et Langage C", "auteur": "M. Trabelsi", "filiere": "Génie Logiciel", "annee": 2022, "dispo": True},
+    {"titre": "Développement Web - HTML, CSS, JS", "auteur": "Y. Mansour", "filiere": "Génie Logiciel", "annee": 2024, "dispo": False},
+    {"titre": "Développement Mobile Flutter", "auteur": "K. Ayari", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
+    {"titre": "Intelligence Artificielle pour tous", "auteur": "L. Ben Salah", "filiere": "Génie Logiciel", "annee": 2025, "dispo": True},
+    {"titre": "Bases de Données SQL & MySQL", "auteur": "S. Gharbi", "filiere": "Systèmes d'Information", "annee": 2023, "dispo": True},
+    {"titre": "Réseaux Informatiques - CCNA", "auteur": "K. Ayari", "filiere": "Systèmes d'Information", "annee": 2023, "dispo": False},
+    {"titre": "Cybersécurité Essentielle", "auteur": "M. Haddad", "filiere": "Systèmes d'Information", "annee": 2025, "dispo": True},
+    {"titre": "Cloud Computing & AWS", "auteur": "A. Kefi", "filiere": "Systèmes d'Information", "annee": 2024, "dispo": True},
+    {"titre": "Management des Entreprises", "auteur": "N. Ben Ahmed", "filiere": "Management", "annee": 2023, "dispo": True},
+    {"titre": "Marketing Digital", "auteur": "R. Slim", "filiere": "Management", "annee": 2024, "dispo": True},
+    {"titre": "Comptabilité & Finance", "auteur": "F. Bouzid", "filiere": "Management", "annee": 2022, "dispo": True},
+    {"titre": "Entrepreneuriat en Tunisie", "auteur": "Y. Ben Romdhane", "filiere": "Management", "annee": 2025, "dispo": True},
+    {"titre": "Communication Professionnelle", "auteur": "S. Mejri", "filiere": "Management", "annee": 2023, "dispo": True},
+    {"titre": "Mathématiques pour l'Informatique", "auteur": "H. Karray", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
+    {"titre": "Anglais pour Informaticiens", "auteur": "E. Ben Youssef", "filiere": "Management", "annee": 2023, "dispo": True},
+    {"titre": "Python Facile - Le Guide Pratique", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
+     "lire": "📖 CHAPITRE 1 - Commencer en Python\n\nPython c'est comme parler à l'ordinateur.\n\nPour dire Bonjour, tu écris :\nprint('Bonjour')\n\nPour calculer :\nprint(2 + 3) -> ça donne 5\n\nPour poser une question :\nprenom = input('Ton prénom ?')\nprint('Bonjour', prenom)\n\nEXERCICE CHEZ TOI :\n1. Ouvre ton téléphone ou ton PC\n2. Va sur python.org ou utilise ton app\n3. Essaie print('Je suis étudiant MIT')\n\nBravo, tu as fait ton premier programme !"},
+    {"titre": "HTML & CSS - Crée ton premier site", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
+     "lire": "📖 CHAPITRE 1 - Ton premier site en 5 minutes\n\nHTML = la structure, comme les murs d'une maison.\nCSS = la décoration, comme la peinture.\n\nTon premier site :\n<html>\n<h1>Bonjour, je suis étudiant MIT</h1>\n<p>Je vais créer mon site</p>\n</html>\n\nEXERCICE CHEZ TOI :\n1. Crée un fichier test.html\n2. Colle ce code dedans\n3. Ouvre-le dans Chrome\n\nTu viens de créer ton premier site web !"},
+    {"titre": "Les Bases de l'Algorithme", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
+     "lire": "📖 CHAPITRE 1 - C'est quoi un algorithme ?\n\nUn algorithme = une recette de cuisine, étape par étape.\n\nExemple : Faire un thé\n1. Prendre de l'eau\n2. Faire bouillir l'eau\n3. Mettre le thé\n4. Servir\n\nEn informatique c'est pareil :\n1. Demander le nom\n2. Demander la note\n3. Si note >= 10 -> Réussi\n4. Sinon -> Échoué\n\nEXERCICE : Écris l'algorithme pour aller de chez toi à MIT Tunis, étape par étape."},
+]
+
+QUESTIONS = [
+    {"q": "1. En Python, comment on affiche 'Bonjour' ?", "options": ["print('Bonjour')", "echo Bonjour", "show('Bonjour')"], "bonne": "print('Bonjour')"},
+    {"q": "2. Quel symbole on utilise pour un commentaire en Python ?", "options": ["//", "#", "/*"], "bonne": "#"},
+    {"q": "3. Combien font 2 * 3 en Python ?", "options": ["5", "6", "23"], "bonne": "6"},
+    {"q": "4. HTML sert à quoi ?", "options": ["Créer la structure d'une page web", "Faire des calculs", "Gérer la base de données"], "bonne": "Créer la structure d'une page web"},
+    {"q": "5. Quelle est la capitale de la Tunisie ?", "options": ["Sfax", "Tunis", "Sousse"], "bonne": "Tunis"},
+]
 
 
 # ======================================================
@@ -156,6 +251,15 @@ def retirer_en_ligne(id_e):
 
 
 # ======================================================
+# ✅ CORRIGÉ : blocage anti-devinette PARTAGÉ (avant, il était dans session_state,
+#    donc un simple rechargement de la page remettait le compteur à zéro)
+# ======================================================
+@st.cache_resource
+def etat_blocage():
+    return {"essais": 0, "jusqua": 0.0}
+
+
+# ======================================================
 # VIBRATIONS
 # ======================================================
 def son_erreur():
@@ -186,7 +290,7 @@ def son_succes():
     """, height=0)
 
 
-# ✏️ CORRIGÉ : le son demandé avant un st.rerun() est joué ici, après le rechargement
+# Le son demandé avant un st.rerun() est joué ici, après le rechargement
 son_demande = st.session_state.pop("son_a_jouer", None)
 if son_demande == "succes":
     son_succes()
@@ -214,48 +318,9 @@ T = {
 t = T[lang]
 
 # ======================================================
-# DONNÉES DE BASE
-# ======================================================
-LIVRES_DE_BASE = [
-    {"titre": "Python pour débutants", "auteur": "A. Ben Ali", "filiere": "Génie Logiciel", "annee": 2023, "dispo": True},
-    {"titre": "Apprendre Python en 30 jours", "auteur": "S. Gharbi", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
-    {"titre": "Algorithme et Langage C", "auteur": "M. Trabelsi", "filiere": "Génie Logiciel", "annee": 2022, "dispo": True},
-    {"titre": "Développement Web - HTML, CSS, JS", "auteur": "Y. Mansour", "filiere": "Génie Logiciel", "annee": 2024, "dispo": False},
-    {"titre": "Développement Mobile Flutter", "auteur": "K. Ayari", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
-    {"titre": "Intelligence Artificielle pour tous", "auteur": "L. Ben Salah", "filiere": "Génie Logiciel", "annee": 2025, "dispo": True},
-    {"titre": "Bases de Données SQL & MySQL", "auteur": "S. Gharbi", "filiere": "Systèmes d'Information", "annee": 2023, "dispo": True},
-    {"titre": "Réseaux Informatiques - CCNA", "auteur": "K. Ayari", "filiere": "Systèmes d'Information", "annee": 2023, "dispo": False},
-    {"titre": "Cybersécurité Essentielle", "auteur": "M. Haddad", "filiere": "Systèmes d'Information", "annee": 2025, "dispo": True},
-    {"titre": "Cloud Computing & AWS", "auteur": "A. Kefi", "filiere": "Systèmes d'Information", "annee": 2024, "dispo": True},
-    {"titre": "Management des Entreprises", "auteur": "N. Ben Ahmed", "filiere": "Management", "annee": 2023, "dispo": True},
-    {"titre": "Marketing Digital", "auteur": "R. Slim", "filiere": "Management", "annee": 2024, "dispo": True},
-    {"titre": "Comptabilité & Finance", "auteur": "F. Bouzid", "filiere": "Management", "annee": 2022, "dispo": True},
-    {"titre": "Entrepreneuriat en Tunisie", "auteur": "Y. Ben Romdhane", "filiere": "Management", "annee": 2025, "dispo": True},
-    {"titre": "Communication Professionnelle", "auteur": "S. Mejri", "filiere": "Management", "annee": 2023, "dispo": True},
-    {"titre": "Mathématiques pour l'Informatique", "auteur": "H. Karray", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
-    {"titre": "Anglais pour Informaticiens", "auteur": "E. Ben Youssef", "filiere": "Management", "annee": 2023, "dispo": True},
-    {"titre": "Python Facile - Le Guide Pratique", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
-     "lire": "📖 CHAPITRE 1 - Commencer en Python\n\nPython c'est comme parler à l'ordinateur.\n\nPour dire Bonjour, tu écris :\nprint('Bonjour')\n\nPour calculer :\nprint(2 + 3) -> ça donne 5\n\nPour poser une question :\nprenom = input('Ton prénom ?')\nprint('Bonjour', prenom)\n\nEXERCICE CHEZ TOI :\n1. Ouvre ton téléphone ou ton PC\n2. Va sur python.org ou utilise ton app\n3. Essaie print('Je suis étudiant MIT')\n\nBravo, tu as fait ton premier programme !"},
-    {"titre": "HTML & CSS - Crée ton premier site", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
-     "lire": "📖 CHAPITRE 1 - Ton premier site en 5 minutes\n\nHTML = la structure, comme les murs d'une maison.\nCSS = la décoration, comme la peinture.\n\nTon premier site :\n<html>\n<h1>Bonjour, je suis étudiant MIT</h1>\n<p>Je vais créer mon site</p>\n</html>\n\nEXERCICE CHEZ TOI :\n1. Crée un fichier test.html\n2. Colle ce code dedans\n3. Ouvre-le dans Chrome\n\nTu viens de créer ton premier site web !"},
-    {"titre": "Les Bases de l'Algorithme", "auteur": "MIT Tunis", "filiere": "Génie Logiciel", "annee": 2026, "dispo": True,
-     "lire": "📖 CHAPITRE 1 - C'est quoi un algorithme ?\n\nUn algorithme = une recette de cuisine, étape par étape.\n\nExemple : Faire un thé\n1. Prendre de l'eau\n2. Faire bouillir l'eau\n3. Mettre le thé\n4. Servir\n\nEn informatique c'est pareil :\n1. Demander le nom\n2. Demander la note\n3. Si note >= 10 -> Réussi\n4. Sinon -> Échoué\n\nEXERCICE : Écris l'algorithme pour aller de chez toi à MIT Tunis, étape par étape."},
-]
-
-QUESTIONS = [
-    {"q": "1. En Python, comment on affiche 'Bonjour' ?", "options": ["print('Bonjour')", "echo Bonjour", "show('Bonjour')"], "bonne": "print('Bonjour')"},
-    {"q": "2. Quel symbole on utilise pour un commentaire en Python ?", "options": ["//", "#", "/*"], "bonne": "#"},
-    {"q": "3. Combien font 2 * 3 en Python ?", "options": ["5", "6", "23"], "bonne": "6"},
-    {"q": "4. HTML sert à quoi ?", "options": ["Créer la structure d'une page web", "Faire des calculs", "Gérer la base de données"], "bonne": "Créer la structure d'une page web"},
-    {"q": "5. Quelle est la capitale de la Tunisie ?", "options": ["Sfax", "Tunis", "Sousse"], "bonne": "Tunis"},
-]
-
-# ======================================================
 # ÉTAT DE LA SESSION (seulement ce qui est PERSONNEL au visiteur)
 # ======================================================
 if "connecte" not in st.session_state: st.session_state.connecte = False
-if "tentatives" not in st.session_state: st.session_state.tentatives = 0
-if "bloque_jusqua" not in st.session_state: st.session_state.bloque_jusqua = 0
 if "etudiant_verifie" not in st.session_state: st.session_state.etudiant_verifie = False
 if "etudiant_nom" not in st.session_state: st.session_state.etudiant_nom = ""
 if "etudiant_id" not in st.session_state: st.session_state.etudiant_id = ""
@@ -280,8 +345,8 @@ def verifier_id_unique(id_tape):
                             morceaux.append(str(ligne[c]))
                     return True, " ".join(morceaux).strip() or "Étudiant MIT"
 
-    # 2) ✏️ CORRIGÉ : on cherche AUSSI dans les IDs créés par l'admin
-    if id_tape in [x.upper() for x in charger_ids()]:
+    # 2) On cherche AUSSI dans les IDs créés par l'admin
+    if id_tape in [str(x).upper() for x in charger_ids()]:
         return True, "Étudiant MIT"
 
     return False, ""
@@ -325,7 +390,7 @@ if st.session_state.connecte:
         else:
             st.info("Aucun Excel importé. Va dans l'onglet Admin pour importer.")
         st.write("**🔑 IDs autorisés :**")
-        st.write(", ".join(ids_actuels))
+        st.write(", ".join(str(x) for x in ids_actuels))
         st.write("**📝 Résultats Tests :**")
         if len(resultats) > 0:
             st.dataframe(pd.DataFrame(resultats))
@@ -348,14 +413,14 @@ if st.session_state.connecte:
         st.rerun()
 elif not st.session_state.etudiant_verifie:
     st.sidebar.info("🔒 Pour voir la Bibliothèque, il faut ton ID Unique.\nSans ID, tu peux voir Formations, Événements et Test, mais pas la Bibliothèque.")
-    id_tape = st.sidebar.text_input("Ton ID Unique", key="id_unique_input")  # ✏️ "()" supprimé
+    id_tape = st.sidebar.text_input("Ton ID Unique", key="id_unique_input")
     if st.sidebar.button("🔓 Débloquer la Bibliothèque", key="btn_debloquer_biblio"):
         ok, nom_trouve = verifier_id_unique(id_tape)
         if ok:
             st.session_state.etudiant_verifie = True
             st.session_state.etudiant_id = id_tape.strip().upper()
             st.session_state.etudiant_nom = nom_trouve
-            st.session_state.son_a_jouer = "succes"  # ✏️ joué après le rerun
+            st.session_state.son_a_jouer = "succes"
             st.rerun()
         else:
             son_erreur()
@@ -363,13 +428,13 @@ elif not st.session_state.etudiant_verifie:
 else:
     st.sidebar.success(f"✅ Connecté : {st.session_state.etudiant_nom}\nID : {st.session_state.etudiant_id}")
     if st.sidebar.button("🚪 Déconnexion Étudiant", key="deco_etudiant_sidebar"):
-        retirer_en_ligne(st.session_state.etudiant_id)  # ✏️ ajouté
+        retirer_en_ligne(st.session_state.etudiant_id)
         st.session_state.etudiant_verifie = False
         st.session_state.etudiant_nom = ""
         st.session_state.etudiant_id = ""
         st.rerun()
 
-# ✏️ AJOUTÉ : on signale que l'étudiant est en ligne (avant, ce n'était jamais fait)
+# On signale que l'étudiant est en ligne
 if st.session_state.etudiant_verifie:
     marquer_en_ligne(st.session_state.etudiant_id, st.session_state.etudiant_nom)
 
@@ -414,7 +479,7 @@ with menu[1]:
                 st.error(texte)
             if "lire" in livre:
                 with st.expander(f"📖 Lire chez soi - {livre['titre']}"):
-                    st.write(livre["lire"])
+                    st.text(livre["lire"])  # ✅ st.text : le code HTML/Python s'affiche tel quel
                     st.info("💡 Astuce : Tu peux lire ça chez toi, sur ton téléphone, sans venir à la bibliothèque.")
 
 # ===== ONGLET 2 : ÉTUDIANTS (ADMIN SEULEMENT) =====
@@ -431,12 +496,12 @@ with menu[2]:
             search = st.text_input("🔍 Rechercher un étudiant par nom...", key="search_etudiant")
             if search:
                 masque = df.astype(str).apply(
-                    lambda col: col.str.contains(search, case=False, na=False, regex=False)  # ✏️ regex=False
+                    lambda col: col.str.contains(search, case=False, na=False, regex=False)
                 ).any(axis=1)
                 df = df[masque]
             st.dataframe(df)
             if "Note" in df.columns:
-                notes = pd.to_numeric(df["Note"], errors="coerce").dropna()  # ✏️ notes numériques
+                notes = pd.to_numeric(df["Note"], errors="coerce").dropna()
                 if len(notes) > 0:
                     st.bar_chart(notes)
         else:
@@ -456,7 +521,6 @@ with menu[4]:
     nom_test = st.text_input(t["nom_label"], placeholder="Ex: Peniel Mwilambwe", key="nom_test_input")
     reponses = []
     for item in QUESTIONS:
-        # ✏️ index=None : aucune réponse cochée au départ
         rep = st.radio(item["q"], item["options"], index=None, key="test_" + item["q"])
         reponses.append(rep)
     if st.button(t["valider"], key="btn_valider_test"):
@@ -469,7 +533,7 @@ with menu[4]:
             for i, item in enumerate(QUESTIONS):
                 if reponses[i] == item["bonne"]:
                     score += 4
-            enregistrer_resultat(nom_test.strip(), score)  # ✏️ enregistré pour TOUT LE MONDE
+            enregistrer_resultat(nom_test.strip(), score)
             st.divider()
             st.write(f"### 🎓 Résultat pour {nom_test} : **{score} / 20**")
             st.progress(score / 20)
@@ -490,25 +554,28 @@ with menu[4]:
 # ===== ONGLET 5 : ADMIN =====
 with menu[5]:
     st.header(t["admin_titre"])
-    if time.time() < st.session_state.bloque_jusqua:
-        reste = int(st.session_state.bloque_jusqua - time.time()) + 1
-        st.error(f"🔒 Bloqué encore {reste} secondes. Recharge la page après ce délai.")
+    blocage = etat_blocage()
+    if time.time() < blocage["jusqua"]:
+        reste = int(blocage["jusqua"] - time.time()) + 1
+        st.error(f"🔒 Connexion Admin bloquée encore {reste} secondes. Recharge la page après ce délai.")
     elif not st.session_state.connecte:
+        if not ADMIN_HASH:
+            st.warning("⚠️ Aucun mot de passe Admin configuré. Remplis MOT_DE_PASSE_ADMIN dans le code (ou ADMIN_HASH dans les Secrets).")
         mdp = st.text_input(t["mdp_label"], type="password", key="mdp_admin_input")
         if st.button("Connexion Admin", key="btn_connexion_admin"):
             if verifier_mdp(mdp):
+                blocage["essais"] = 0
                 st.session_state.connecte = True
-                st.session_state.tentatives = 0
-                st.session_state.son_a_jouer = "succes"  # ✏️ joué après le rerun
+                st.session_state.son_a_jouer = "succes"
                 st.rerun()
             else:
-                st.session_state.tentatives += 1
-                restant = 3 - st.session_state.tentatives
+                blocage["essais"] += 1
+                restant = 3 - blocage["essais"]
                 son_erreur()
                 if restant <= 0:
-                    st.session_state.bloque_jusqua = time.time() + 30  # ✏️ 30 (et non 35)
-                    st.session_state.tentatives = 0
-                    st.error("🔒 Trop d'essais. Bloqué 30 secondes.")  # ✏️ message ajouté
+                    blocage["jusqua"] = time.time() + 30
+                    blocage["essais"] = 0
+                    st.error("🔒 Trop d'essais. Bloqué 30 secondes.")
                 else:
                     st.error(f"❌ Mauvais mot de passe. Il reste {restant}")
     else:
@@ -528,9 +595,12 @@ with menu[5]:
         if fichier is not None:
             try:
                 df_import = pd.read_csv(fichier) if fichier.name.endswith(".csv") else pd.read_excel(fichier)
-                df_import.to_csv(FICHIER_ETUDIANTS, index=False)  # ✏️ sauvegardé pour tout le monde
-                st.success(f"✅ {len(df_import)} étudiants chargés et enregistrés !")
+                st.write(f"Aperçu : {len(df_import)} lignes")
                 st.dataframe(df_import)
+                # ✅ CORRIGÉ : on enregistre seulement quand l'admin clique (avant : réécrit à chaque rechargement)
+                if st.button("💾 Enregistrer cette liste pour tout le monde", key="btn_enregistrer_import"):
+                    df_import.to_csv(FICHIER_ETUDIANTS, index=False)
+                    st.success(f"✅ {len(df_import)} étudiants enregistrés !")
                 st.download_button("⬇️ Télécharger la liste (CSV)", df_import.to_csv(index=False).encode("utf-8"),
                                    "etudiants.csv", mime="text/csv", key="dl_excel_admin")
             except Exception as e:
@@ -546,14 +616,14 @@ with menu[5]:
         ids = charger_ids()
         nouvel_id = st.text_input("Nouvel ID Unique (ex: MIT-003)", key="nouvel_id_input")
         if st.button("➕ Ajouter cet ID", key="btn_ajouter_id"):
-            if nouvel_id and nouvel_id.strip().upper() not in [x.upper() for x in ids]:
+            if nouvel_id and nouvel_id.strip().upper() not in [str(x).upper() for x in ids]:
                 ids.append(nouvel_id.strip().upper())
                 sauver_ids(ids)
                 st.success(f"✅ ID {nouvel_id.strip().upper()} créé ! Donne-le à l'étudiant.")
             elif nouvel_id:
                 st.warning("Cet ID existe déjà.")
         st.write("**IDs autorisés :**")
-        st.write(", ".join(ids))
+        st.write(", ".join(str(x) for x in ids))
         id_a_supprimer = st.selectbox("Supprimer un ID ?", ["Aucun"] + ids, key="supprimer_id_select")
         if st.button("🗑️ Supprimer cet ID", key="btn_supprimer_id"):
             if id_a_supprimer != "Aucun":
@@ -565,7 +635,7 @@ with menu[5]:
         st.subheader(t["ajouter_livre"])
         nt = st.text_input("Titre du livre", key="nouveau_titre_livre")
         na = st.text_input("Auteur", key="nouvel_auteur_livre")
-        nf = st.selectbox("Filière", ["Génie Logiciel", "Systèmes d'Information", "Management"], key="nouvelle_filiere_livre")  # ✏️ ajouté
+        nf = st.selectbox("Filière", ["Génie Logiciel", "Systèmes d'Information", "Management"], key="nouvelle_filiere_livre")
         if st.button("Ajouter le livre", key="btn_ajouter_livre"):
             if nt and na:
                 ajoutes = lire_json(FICHIER_LIVRES, [])
