@@ -1,81 +1,201 @@
 import streamlit as st
-import hashlib
-import time
-import pandas as pd
-from datetime import datetime
 import streamlit.components.v1 as components
-import json, os
-from datetime import datetime
+import pandas as pd
+import hashlib
+import json
+import os
+import time
+import uuid
 import requests
+from datetime import datetime
 
+# ✏️ CORRIGÉ : doit être la 1ère commande Streamlit
+st.set_page_config(page_title="MIT Tunis - Monplaisir", page_icon="🎓", layout="wide")
+
+# ======================================================
+# CONFIGURATION
+# ======================================================
 SHEET_ID = "1jUbSyUFGGX4WeCw5Pwj8hDHkmCmkuy9H-PL22gTJhxY"
 WEB_APP_URL = "https://script.google.com/macros/s/AKfycby0xCfO-0ozSBNqLs0qkLk9sIrqBwujteOmOUHd6pgxn4RdUq3TYWj7IRBgQhYGuDDlZw/exec"
 
+# Fichiers PARTAGÉS entre tous les visiteurs
+FICHIER_EN_LIGNE = "en_ligne.json"
+FICHIER_IDS = "ids_autorises.json"
+FICHIER_LIVRES = "livres_ajoutes.json"
+FICHIER_RESULTATS = "resultats.json"
+FICHIER_ETUDIANTS = "etudiants_importes.csv"
 
+DELAI_EN_LIGNE = 300  # secondes d'inactivité avant de disparaître de "en ligne"
+IDS_PAR_DEFAUT = ["MIT-2026-PENIEL", "MIT-001", "MIT-002"]
+COLONNES_ID = ["id", "id unique", "code", "email", "matricule"]
+
+# ✏️ CORRIGÉ : mot de passe lu depuis les "secrets" si possible
+MOT_DE_PASSE_PAR_DEFAUT = "MIT@*#2026"  # ⚠️ À SUPPRIMER après avoir configuré ADMIN_HASH
+try:
+    ADMIN_HASH = st.secrets["ADMIN_HASH"]
+except Exception:
+    ADMIN_HASH = hashlib.sha256(MOT_DE_PASSE_PAR_DEFAUT.encode()).hexdigest()
+
+
+def verifier_mdp(mdp):
+    return hashlib.sha256(mdp.encode()).hexdigest() == ADMIN_HASH
+
+
+# ======================================================
+# OUTILS : fichiers partagés
+# ======================================================
+def lire_json(chemin, defaut):
+    if os.path.exists(chemin):
+        try:
+            with open(chemin, "r", encoding="utf-8") as f:  # ✏️ encoding ajouté
+                return json.load(f)
+        except Exception:
+            return defaut
+    return defaut
+
+
+def ecrire_json(chemin, data):
+    with open(chemin, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ======================================================
+# GOOGLE SHEETS (lecture, mise en cache 60 secondes)
+# ======================================================
+@st.cache_data(ttl=60)
 def lire_sheet(nom_feuille):
     url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={nom_feuille}"
     try:
         return pd.read_csv(url)
-    except:
+    except Exception:
         return pd.DataFrame()
 
-# Au démarrage, on lit le vrai cahier, pas la mémoire
-etudiants_df = lire_sheet("Etudiants")
-resultats_df = lire_sheet("Resultats")
+
+# ======================================================
+# DONNÉES PARTAGÉES (étudiants, IDs, livres, résultats)
+# ======================================================
+def charger_etudiants():
+    """Excel importé par l'admin, sinon la feuille Google 'Etudiants', sinon None."""
+    if os.path.exists(FICHIER_ETUDIANTS):
+        try:
+            return pd.read_csv(FICHIER_ETUDIANTS)
+        except Exception:
+            pass
+    df = lire_sheet("Etudiants")
+    if not df.empty:
+        return df
+    return None
 
 
-def son_erreur():
-    components.html("""
-        <script>
-        if (navigator.vibrate) { navigator.vibrate([200, 100, 200]); }
-        var audio = new Audio("https://www.soundjay.com/buttons/sounds/button-10.mp3");
-        audio.play();
-        </script>
-    """, height=0)
+def charger_ids():
+    return lire_json(FICHIER_IDS, list(IDS_PAR_DEFAUT))
 
-def son_succes():
-    components.html("""
-        <script>
-        if (navigator.vibrate) { navigator.vibrate([50]); }
-        var audio = new Audio("https://cdn.pixabay.com/audio/2022/03/10/audio_2c8c7b4f2a.mp3");
-        audio.play();
-        </script>
-    """, height=0)
 
-# --- ETUDIANTS EN LIGNE ---
-FICHIER_EN_LIGNE = "en_ligne.json"
+def sauver_ids(ids):
+    ecrire_json(FICHIER_IDS, ids)
+
+
+def charger_livres():
+    return LIVRES_DE_BASE + lire_json(FICHIER_LIVRES, [])
+
+
+def charger_resultats():
+    return lire_json(FICHIER_RESULTATS, [])
+
+
+def enregistrer_resultat(nom, score):
+    reussi = score >= 10
+    resultats = charger_resultats()
+    resultats.append({
+        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Nom": nom,
+        "Note /20": score,
+        "Réussi": "OUI ✅" if reussi else "NON ❌",
+    })
+    ecrire_json(FICHIER_RESULTATS, resultats)
+    # Copie vers Google Sheets (si ça échoue, ce n'est pas grave)
+    try:
+        requests.post(WEB_APP_URL, json={
+            "feuille": "Resultats",
+            "nom": nom,
+            "note": score,
+            "reussi": "OUI" if reussi else "NON",
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }, timeout=5)
+    except Exception:
+        pass
+
+
+# ======================================================
+# ÉTUDIANTS EN LIGNE
+# ======================================================
+def liste_en_ligne():
+    data = lire_json(FICHIER_EN_LIGNE, {})
+    maintenant = time.time()
+    return {k: v for k, v in data.items() if maintenant - v.get("ts", 0) < DELAI_EN_LIGNE}
+
 
 def marquer_en_ligne(id_e, nom):
-    import uuid
     if "mon_token" not in st.session_state:
         st.session_state.mon_token = str(uuid.uuid4())
-    
     en_ligne = liste_en_ligne()
     en_ligne[id_e] = {
         "nom": nom,
         "heure": datetime.now().strftime("%H:%M:%S"),
-        "token": st.session_state.mon_token
+        "ts": time.time(),
+        "token": st.session_state.mon_token,
     }
-    with open(FICHIER_EN_LIGNE, "w", encoding="utf-8") as f:
-        json.dump(en_ligne, f, indent=2, ensure_ascii=False)
+    ecrire_json(FICHIER_EN_LIGNE, en_ligne)
 
 
-def liste_en_ligne():
-    if os.path.exists(FICHIER_EN_LIGNE):
-        try:
-            with open(FICHIER_EN_LIGNE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+def retirer_en_ligne(id_e):
+    en_ligne = lire_json(FICHIER_EN_LIGNE, {})
+    if id_e in en_ligne:
+        del en_ligne[id_e]
+        ecrire_json(FICHIER_EN_LIGNE, en_ligne)
 
 
-st.set_page_config(page_title="MIT Tunis - Monplaisir", page_icon="🎓", layout="wide")
+# ======================================================
+# VIBRATIONS
+# ======================================================
+def son_erreur():
+    components.html("""
+        <script>
+        try {
+            if (window.parent.navigator.vibrate) {
+                window.parent.navigator.vibrate([500, 200, 500, 200, 500]);
+            } else if (navigator.vibrate) {
+                navigator.vibrate([500, 200, 500, 200, 500]);
+            }
+        } catch(e) {}
+        </script>
+    """, height=0)
 
-ADMIN_HASH = hashlib.sha256("MIT@*#2026".encode()).hexdigest()
-def verifier_mdp(mdp):
-    return hashlib.sha256(mdp.encode()).hexdigest() == ADMIN_HASH
 
+def son_succes():
+    components.html("""
+        <script>
+        try {
+            if (window.parent.navigator.vibrate) {
+                window.parent.navigator.vibrate([100]);
+            } else if (navigator.vibrate) {
+                navigator.vibrate([100]);
+            }
+        } catch(e) {}
+        </script>
+    """, height=0)
+
+
+# ✏️ CORRIGÉ : le son demandé avant un st.rerun() est joué ici, après le rechargement
+son_demande = st.session_state.pop("son_a_jouer", None)
+if son_demande == "succes":
+    son_succes()
+elif son_demande == "erreur":
+    son_erreur()
+
+# ======================================================
+# STYLE + LANGUES
+# ======================================================
 st.markdown("""
 <style>
 .main { background-color: #F0F6FF; }
@@ -93,6 +213,9 @@ T = {
 }
 t = T[lang]
 
+# ======================================================
+# DONNÉES DE BASE
+# ======================================================
 LIVRES_DE_BASE = [
     {"titre": "Python pour débutants", "auteur": "A. Ben Ali", "filiere": "Génie Logiciel", "annee": 2023, "dispo": True},
     {"titre": "Apprendre Python en 30 jours", "auteur": "S. Gharbi", "filiere": "Génie Logiciel", "annee": 2024, "dispo": True},
@@ -127,37 +250,46 @@ QUESTIONS = [
     {"q": "5. Quelle est la capitale de la Tunisie ?", "options": ["Sfax", "Tunis", "Sousse"], "bonne": "Tunis"},
 ]
 
-if "livres" not in st.session_state: st.session_state.livres = LIVRES_DE_BASE.copy()
-if "etudiants_df" not in st.session_state: st.session_state.etudiants_df = None
-if "resultats" not in st.session_state: st.session_state.resultats = []
+# ======================================================
+# ÉTAT DE LA SESSION (seulement ce qui est PERSONNEL au visiteur)
+# ======================================================
 if "connecte" not in st.session_state: st.session_state.connecte = False
 if "tentatives" not in st.session_state: st.session_state.tentatives = 0
 if "bloque_jusqua" not in st.session_state: st.session_state.bloque_jusqua = 0
 if "etudiant_verifie" not in st.session_state: st.session_state.etudiant_verifie = False
 if "etudiant_nom" not in st.session_state: st.session_state.etudiant_nom = ""
 if "etudiant_id" not in st.session_state: st.session_state.etudiant_id = ""
-if "ids_autorises" not in st.session_state: st.session_state.ids_autorises = ["MIT-2026-PENIEL", "MIT-001", "MIT-002"]
+
 
 def verifier_id_unique(id_tape):
     id_tape = str(id_tape).strip().upper()
     if not id_tape:
         return False, ""
-    if st.session_state.etudiants_df is not None:
-        df = st.session_state.etudiants_df
+
+    # 1) On cherche dans l'Excel / la feuille Google
+    df = charger_etudiants()
+    if df is not None:
         for col in df.columns:
-            if str(col).lower() in ["id", "id unique", "code", "email", "matricule"]:
-                valeurs = df[col].astype(str).str.strip().str.upper().tolist()
-                if id_tape in valeurs:
-                    ligne = df[df[col].astype(str).str.strip().str.upper() == id_tape]
-                    nom_trouve = ""
+            if str(col).strip().lower() in COLONNES_ID:
+                masque = df[col].astype(str).str.strip().str.upper() == id_tape
+                if masque.any():
+                    ligne = df[masque].iloc[0]
+                    morceaux = []
                     for c in ["Nom", "Prénom", "Prenom", "Name"]:
-                        if c in df.columns:
-                            nom_trouve += str(ligne.iloc[0][c]) + " "
-                    return True, nom_trouve.strip()
-        return False, ""
-    if id_tape in [x.upper() for x in st.session_state.ids_autorises]:
+                        if c in df.columns and pd.notna(ligne[c]):
+                            morceaux.append(str(ligne[c]))
+                    return True, " ".join(morceaux).strip() or "Étudiant MIT"
+
+    # 2) ✏️ CORRIGÉ : on cherche AUSSI dans les IDs créés par l'admin
+    if id_tape in [x.upper() for x in charger_ids()]:
         return True, "Étudiant MIT"
+
     return False, ""
+
+
+# Données partagées chargées une fois par affichage
+livres = charger_livres()
+resultats = charger_resultats()
 
 # ===== HEADER =====
 st.markdown("<div style='text-align: center; font-size: 90px; margin-bottom: -20px;'>🎓</div>", unsafe_allow_html=True)
@@ -166,7 +298,7 @@ st.title(t["titre"])
 st.subheader(t["sous"])
 st.write(f"### {t['bienvenue']}")
 
-# ===== VUE ADMIN EN HAUT - SEUL ADMIN VOIT CA =====
+# ===== VUE ADMIN EN HAUT - SEUL ADMIN VOIT ÇA =====
 if st.session_state.connecte:
     st.markdown("<div class='admin-box'><h3>👑 MODE ADMIN - Vue Administrateur</h3><p>Tu vois tout. Les étudiants ne voient pas cette partie.</p></div>", unsafe_allow_html=True)
     st.subheader("🟢 Étudiants en ligne")
@@ -174,38 +306,40 @@ if st.session_state.connecte:
     if en_ligne:
         st.write(f"**{len(en_ligne)} étudiant(s) en ligne**")
         for id_e, infos in en_ligne.items():
-            st.write(f"🟢 {infos['nom']} - ID: {id_e} - Connecté à {infos['heure']}")
+            st.write(f"🟢 {infos['nom']} - ID: {id_e} - Dernière activité à {infos['heure']}")
     else:
         st.info("Aucun étudiant en ligne pour le moment.")
 
-    nb_etudiants = len(st.session_state.etudiants_df) if st.session_state.etudiants_df is not None else 0
+    df_admin = charger_etudiants()
+    nb_etudiants = len(df_admin) if df_admin is not None else 0
+    ids_actuels = charger_ids()
     a1, a2, a3, a4 = st.columns(4)
     a1.metric("👨‍🎓 Étudiants inscrits", nb_etudiants)
-    a2.metric("📚 Livres", len(st.session_state.livres))
-    a3.metric("🔑 IDs créés", len(st.session_state.ids_autorises))
-    a4.metric("📝 Tests passés", len(st.session_state.resultats))
+    a2.metric("📚 Livres", len(livres))
+    a3.metric("🔑 IDs créés", len(ids_actuels))
+    a4.metric("📝 Tests passés", len(resultats))
     with st.expander("👁️ Voir le tableau Admin complet", expanded=False):
         st.write("**📋 Étudiants Excel :**")
-        if st.session_state.etudiants_df is not None:
-            st.dataframe(st.session_state.etudiants_df, use_container_width=True)
+        if df_admin is not None:
+            st.dataframe(df_admin)
         else:
             st.info("Aucun Excel importé. Va dans l'onglet Admin pour importer.")
         st.write("**🔑 IDs autorisés :**")
-        st.write(", ".join(st.session_state.ids_autorises))
+        st.write(", ".join(ids_actuels))
         st.write("**📝 Résultats Tests :**")
-        if len(st.session_state.resultats) > 0:
-            st.dataframe(pd.DataFrame(st.session_state.resultats), use_container_width=True)
+        if len(resultats) > 0:
+            st.dataframe(pd.DataFrame(resultats))
         else:
             st.info("Aucun test passé.")
     st.divider()
 else:
     # Vue publique : on cache le nombre d'étudiants
     c1, c2, c3 = st.columns(3)
-    c1.metric("📚 Livres", len(st.session_state.livres))
-    c2.metric("📝 Tests passés", len(st.session_state.resultats))
+    c1.metric("📚 Livres", len(livres))
+    c2.metric("📝 Tests passés", len(resultats))
     c3.metric("🎓 Formations", "3")
 
-# ===== SIDEBAR ETUDIANT =====
+# ===== SIDEBAR ÉTUDIANT =====
 st.sidebar.header("🔑 Accès Étudiant - ID Unique")
 if st.session_state.connecte:
     st.sidebar.success("✅ Tu es connecté en Admin")
@@ -214,15 +348,14 @@ if st.session_state.connecte:
         st.rerun()
 elif not st.session_state.etudiant_verifie:
     st.sidebar.info("🔒 Pour voir la Bibliothèque, il faut ton ID Unique.\nSans ID, tu peux voir Formations, Événements et Test, mais pas la Bibliothèque.")
-    id_tape = st.sidebar.text_input("Ton ID Unique ()", key="id_unique_input")
+    id_tape = st.sidebar.text_input("Ton ID Unique", key="id_unique_input")  # ✏️ "()" supprimé
     if st.sidebar.button("🔓 Débloquer la Bibliothèque", key="btn_debloquer_biblio"):
         ok, nom_trouve = verifier_id_unique(id_tape)
         if ok:
-            son_succes()
             st.session_state.etudiant_verifie = True
             st.session_state.etudiant_id = id_tape.strip().upper()
             st.session_state.etudiant_nom = nom_trouve
-            st.sidebar.success(f"✅ Bienvenue {nom_trouve} ! Bibliothèque débloquée.")
+            st.session_state.son_a_jouer = "succes"  # ✏️ joué après le rerun
             st.rerun()
         else:
             son_erreur()
@@ -230,21 +363,28 @@ elif not st.session_state.etudiant_verifie:
 else:
     st.sidebar.success(f"✅ Connecté : {st.session_state.etudiant_nom}\nID : {st.session_state.etudiant_id}")
     if st.sidebar.button("🚪 Déconnexion Étudiant", key="deco_etudiant_sidebar"):
+        retirer_en_ligne(st.session_state.etudiant_id)  # ✏️ ajouté
         st.session_state.etudiant_verifie = False
         st.session_state.etudiant_nom = ""
         st.session_state.etudiant_id = ""
         st.rerun()
 
+# ✏️ AJOUTÉ : on signale que l'étudiant est en ligne (avant, ce n'était jamais fait)
+if st.session_state.etudiant_verifie:
+    marquer_en_ligne(st.session_state.etudiant_id, st.session_state.etudiant_nom)
+
 a_droit_biblio = st.session_state.connecte or st.session_state.etudiant_verifie
 
 menu = st.tabs([t["formations"], t["biblio"], t["etudiants"], t["events"], t["test"], t["admin"]])
 
+# ===== ONGLET 0 : FORMATIONS =====
 with menu[0]:
     col1, col2, col3 = st.columns(3)
     col1.info("**💻 Génie Logiciel**\n\nPython, C, Web, Mobile, IA")
     col2.info("**📊 Systèmes d'Information**\n\nBases de données, Réseaux, Cloud")
     col3.info("**💼 Management**\n\nBusiness, Marketing, Finance")
 
+# ===== ONGLET 1 : BIBLIOTHÈQUE =====
 with menu[1]:
     st.header(t["biblio"])
     if not a_droit_biblio:
@@ -256,21 +396,28 @@ with menu[1]:
             st.success(f"✅ Bienvenue {st.session_state.etudiant_nom} - Bibliothèque débloquée")
         if st.session_state.connecte:
             st.success("✅ Vue Admin : tu vois toute la Bibliothèque")
-        st.write(f"**{len(st.session_state.livres)} livres disponibles**")
+        st.write(f"**{len(livres)} livres disponibles**")
         col_f1, col_f2 = st.columns(2)
         recherche = col_f1.text_input(t["recherche"], key="recherche_biblio")
         filiere_choisie = col_f2.selectbox("Filtrer par filière", ["Toutes", "Génie Logiciel", "Systèmes d'Information", "Management"], key="filtre_biblio")
-        for livre in st.session_state.livres:
-            if filiere_choisie != "Toutes" and livre["filiere"] != filiere_choisie: continue
-            if recherche.lower() not in livre["titre"].lower() and recherche.lower() not in livre["auteur"].lower() and recherche != "": continue
+        for livre in livres:
+            if filiere_choisie != "Toutes" and livre["filiere"] != filiere_choisie:
+                continue
+            mot = recherche.lower()
+            if mot and mot not in livre["titre"].lower() and mot not in livre["auteur"].lower():
+                continue
             statut = "Disponible ✅" if livre["dispo"] else "Emprunté ❌"
-            if livre["dispo"]: st.success(f"**{livre['titre']}** | {livre['auteur']} | {livre['filiere']} | {livre['annee']} | {statut}")
-            else: st.error(f"**{livre['titre']}** | {livre['auteur']} | {livre['filiere']} | {livre['annee']} | {statut}")
+            texte = f"**{livre['titre']}** | {livre['auteur']} | {livre['filiere']} | {livre['annee']} | {statut}"
+            if livre["dispo"]:
+                st.success(texte)
+            else:
+                st.error(texte)
             if "lire" in livre:
                 with st.expander(f"📖 Lire chez soi - {livre['titre']}"):
                     st.write(livre["lire"])
                     st.info("💡 Astuce : Tu peux lire ça chez toi, sur ton téléphone, sans venir à la bibliothèque.")
 
+# ===== ONGLET 2 : ÉTUDIANTS (ADMIN SEULEMENT) =====
 with menu[2]:
     st.header(t["etudiants"])
     if not st.session_state.connecte:
@@ -278,114 +425,156 @@ with menu[2]:
         st.info("Les étudiants ne voient pas combien d'étudiants sont inscrits, ni la liste.")
         st.info("Si tu es étudiant, va dans Bibliothèque avec ton ID Unique.")
     else:
-        if st.session_state.etudiants_df is not None:
-            df = st.session_state.etudiants_df
-            st.success(f"✅ {len(df)} étudiants chargés depuis Excel")
+        df = charger_etudiants()
+        if df is not None:
+            st.success(f"✅ {len(df)} étudiants chargés")
             search = st.text_input("🔍 Rechercher un étudiant par nom...", key="search_etudiant")
-            if search: df = df[df.astype(str).apply(lambda x: x.str.contains(search, case=False, na=False)).any(axis=1)]
-            st.dataframe(df, use_container_width=True)
-            if "Note" in df.columns: st.bar_chart(df["Note"])
+            if search:
+                masque = df.astype(str).apply(
+                    lambda col: col.str.contains(search, case=False, na=False, regex=False)  # ✏️ regex=False
+                ).any(axis=1)
+                df = df[masque]
+            st.dataframe(df)
+            if "Note" in df.columns:
+                notes = pd.to_numeric(df["Note"], errors="coerce").dropna()  # ✏️ notes numériques
+                if len(notes) > 0:
+                    st.bar_chart(notes)
         else:
             st.warning("Aucun fichier Excel importé. Va dans Admin pour importer.")
 
+# ===== ONGLET 3 : ÉVÉNEMENTS =====
 with menu[3]:
     st.header(t["events"])
     st.warning("🎉 Soirée d'intégration - Vendredi 18h - Monplaisir")
     st.warning("⚽ Tournoi de foot MIT - Samedi 10h")
     st.warning("📝 Examens Blancs - Lundi prochain")
 
+# ===== ONGLET 4 : TEST =====
 with menu[4]:
     st.header(t["test_titre"])
     st.info("📋 5 questions - Chaque bonne réponse = 4 points - Total = 20/20 - Pour réussir il faut 10/20")
     nom_test = st.text_input(t["nom_label"], placeholder="Ex: Peniel Mwilambwe", key="nom_test_input")
     reponses = []
     for item in QUESTIONS:
-        rep = st.radio(item["q"], item["options"], key="test_" + item["q"])
+        # ✏️ index=None : aucune réponse cochée au départ
+        rep = st.radio(item["q"], item["options"], index=None, key="test_" + item["q"])
         reponses.append(rep)
     if st.button(t["valider"], key="btn_valider_test"):
-        if not nom_test: st.error("❌ Écris d'abord ton nom !")
+        if not nom_test.strip():
+            st.error("❌ Écris d'abord ton nom !")
+        elif None in reponses:
+            st.error("❌ Réponds à toutes les questions avant de valider !")
         else:
             score = 0
             for i, item in enumerate(QUESTIONS):
-                if reponses[i] == item["bonne"]: score += 4
-            st.session_state.resultats.append({"Nom": nom_test, "Note /20": score, "Réussi": "OUI ✅" if score >= 10 else "NON ❌"})
+                if reponses[i] == item["bonne"]:
+                    score += 4
+            enregistrer_resultat(nom_test.strip(), score)  # ✏️ enregistré pour TOUT LE MONDE
             st.divider()
             st.write(f"### 🎓 Résultat pour {nom_test} : **{score} / 20**")
             st.progress(score / 20)
             if score >= 16:
-                st.balloons(); st.success("🎉 EXCELLENT ! Félicitations, tu es un champion MIT !")
-            elif score >= 10: st.success("✅ RÉUSSI ! Bravo, tu as validé le test.")
-            else: st.error("❌ ÉCHOUÉ. Ne lâche pas, relis les livres de la bibliothèque et recommence !")
+                st.balloons()
+                st.success("🎉 EXCELLENT ! Félicitations, tu es un champion MIT !")
+            elif score >= 10:
+                st.success("✅ RÉUSSI ! Bravo, tu as validé le test.")
+            else:
+                st.error("❌ ÉCHOUÉ. Ne lâche pas, relis les livres de la bibliothèque et recommence !")
             st.write("**Correction :**")
             for i, item in enumerate(QUESTIONS):
-                if reponses[i] == item["bonne"]: st.write(f"{item['q']} -> ✅ {item['bonne']}")
-                else: st.write(f"{item['q']} -> ❌ Tu as mis {reponses[i]} | Bonne réponse : {item['bonne']}")
+                if reponses[i] == item["bonne"]:
+                    st.write(f"{item['q']} -> ✅ {item['bonne']}")
+                else:
+                    st.write(f"{item['q']} -> ❌ Tu as mis {reponses[i]} | Bonne réponse : {item['bonne']}")
 
+# ===== ONGLET 5 : ADMIN =====
 with menu[5]:
     st.header(t["admin_titre"])
     if time.time() < st.session_state.bloque_jusqua:
-        st.error("🔒 Bloqué 30 secondes")
+        reste = int(st.session_state.bloque_jusqua - time.time()) + 1
+        st.error(f"🔒 Bloqué encore {reste} secondes. Recharge la page après ce délai.")
     elif not st.session_state.connecte:
         mdp = st.text_input(t["mdp_label"], type="password", key="mdp_admin_input")
         if st.button("Connexion Admin", key="btn_connexion_admin"):
             if verifier_mdp(mdp):
-                son_succes()
                 st.session_state.connecte = True
                 st.session_state.tentatives = 0
+                st.session_state.son_a_jouer = "succes"  # ✏️ joué après le rerun
                 st.rerun()
             else:
                 st.session_state.tentatives += 1
                 restant = 3 - st.session_state.tentatives
+                son_erreur()
                 if restant <= 0:
-                    st.session_state.bloque_jusqua = time.time() + 35
+                    st.session_state.bloque_jusqua = time.time() + 30  # ✏️ 30 (et non 35)
                     st.session_state.tentatives = 0
+                    st.error("🔒 Trop d'essais. Bloqué 30 secondes.")  # ✏️ message ajouté
                 else:
-                    son_erreur ()
                     st.error(f"❌ Mauvais mot de passe. Il reste {restant}")
     else:
         st.success(t["bienvenue_admin"])
+
+        # --- Résultats des tests ---
         st.subheader("📊 Résultats des Tests")
-        if len(st.session_state.resultats) > 0:
-            st.dataframe(pd.DataFrame(st.session_state.resultats), use_container_width=True)
+        if len(resultats) > 0:
+            st.dataframe(pd.DataFrame(resultats))
         else:
             st.info("Aucun test passé pour le moment.")
+
+        # --- Import Excel ---
         st.subheader(t["excel_titre"])
         st.info(t["excel_info"])
-        fichier = st.file_uploader("📂 Choisis ton fichier Excel (.xlsx)", type=["xlsx", "xls", "csv"], key="upload_excel_admin")
+        fichier = st.file_uploader("📂 Choisis ton fichier Excel (.xlsx) ou CSV", type=["xlsx", "xls", "csv"], key="upload_excel_admin")
         if fichier is not None:
             try:
-                df = pd.read_csv(fichier) if fichier.name.endswith(".csv") else pd.read_excel(fichier)
-                st.session_state.etudiants_df = df
-                st.success(f"✅ {len(df)} étudiants chargés !")
-                st.dataframe(df)
-                st.download_button("⬇️ Télécharger cet Excel", df.to_csv(index=False).encode(), "etudiants.csv", key="dl_excel_admin")
+                df_import = pd.read_csv(fichier) if fichier.name.endswith(".csv") else pd.read_excel(fichier)
+                df_import.to_csv(FICHIER_ETUDIANTS, index=False)  # ✏️ sauvegardé pour tout le monde
+                st.success(f"✅ {len(df_import)} étudiants chargés et enregistrés !")
+                st.dataframe(df_import)
+                st.download_button("⬇️ Télécharger la liste (CSV)", df_import.to_csv(index=False).encode("utf-8"),
+                                   "etudiants.csv", mime="text/csv", key="dl_excel_admin")
             except Exception as e:
                 st.error(f"Erreur: {e}")
+        if os.path.exists(FICHIER_ETUDIANTS):
+            if st.button("🗑️ Supprimer l'import (revenir à Google Sheets)", key="btn_suppr_import"):
+                os.remove(FICHIER_ETUDIANTS)
+                st.rerun()
+
+        # --- IDs uniques ---
         st.subheader("🔑 Créer un ID Unique pour un étudiant")
         st.info("L'étudiant utilisera cet ID pour débloquer la Bibliothèque. Ex: MIT-003")
+        ids = charger_ids()
         nouvel_id = st.text_input("Nouvel ID Unique (ex: MIT-003)", key="nouvel_id_input")
         if st.button("➕ Ajouter cet ID", key="btn_ajouter_id"):
-            if nouvel_id and nouvel_id.strip().upper() not in [x.upper() for x in st.session_state.ids_autorises]:
-                st.session_state.ids_autorises.append(nouvel_id.strip().upper())
+            if nouvel_id and nouvel_id.strip().upper() not in [x.upper() for x in ids]:
+                ids.append(nouvel_id.strip().upper())
+                sauver_ids(ids)
                 st.success(f"✅ ID {nouvel_id.strip().upper()} créé ! Donne-le à l'étudiant.")
             elif nouvel_id:
                 st.warning("Cet ID existe déjà.")
         st.write("**IDs autorisés :**")
-        st.write(", ".join(st.session_state.ids_autorises))
-        id_a_supprimer = st.selectbox("Supprimer un ID ?", ["Aucun"] + st.session_state.ids_autorises, key="supprimer_id_select")
+        st.write(", ".join(ids))
+        id_a_supprimer = st.selectbox("Supprimer un ID ?", ["Aucun"] + ids, key="supprimer_id_select")
         if st.button("🗑️ Supprimer cet ID", key="btn_supprimer_id"):
             if id_a_supprimer != "Aucun":
-                st.session_state.ids_autorises.remove(id_a_supprimer)
-                st.success(f"ID {id_a_supprimer} supprimé")
+                ids.remove(id_a_supprimer)
+                sauver_ids(ids)
                 st.rerun()
+
+        # --- Ajouter un livre ---
         st.subheader(t["ajouter_livre"])
         nt = st.text_input("Titre du livre", key="nouveau_titre_livre")
         na = st.text_input("Auteur", key="nouvel_auteur_livre")
+        nf = st.selectbox("Filière", ["Génie Logiciel", "Systèmes d'Information", "Management"], key="nouvelle_filiere_livre")  # ✏️ ajouté
         if st.button("Ajouter le livre", key="btn_ajouter_livre"):
             if nt and na:
-                st.session_state.livres.append({"titre": nt, "auteur": na, "filiere": "Génie Logiciel", "annee": 2026, "dispo": True})
-                st.success("Livre ajouté !")
+                ajoutes = lire_json(FICHIER_LIVRES, [])
+                ajoutes.append({"titre": nt, "auteur": na, "filiere": nf, "annee": 2026, "dispo": True})
+                ecrire_json(FICHIER_LIVRES, ajoutes)
                 st.rerun()
+            else:
+                st.warning("Remplis le titre et l'auteur.")
+
         if st.button(t["deconnexion"], key="btn_deconnexion_admin"):
             st.session_state.connecte = False
             st.rerun()
